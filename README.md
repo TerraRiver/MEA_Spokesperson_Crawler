@@ -94,10 +94,10 @@ mea_data/
 | doc_type | 字符串 | 文本类型，取值规则见下表 |
 | title | 字符串 | 标题，原样保留 |
 | publication_date | 字符串 | 发布日期，格式 `YYYY-MM-DD`，取页面日期（详情页 `.date`，与列表日期一致） |
-| briefing_date | 字符串或 null | 标题末尾括号中的日期（如 "(January 30, 2020)"），格式 `YYYY-MM-DD`；常比 `publication_date` 早一天；标题中没有日期时填 null |
+| briefing_date | 字符串或 null | 仅 Transcripts：标题中最后一个可识别的日期（多在末尾括号中，如 "(January 30, 2020)"、"(11th December 2020)"、"(06-June-2022)"，也可能不带括号，如 "…on 14 August 2020"），格式 `YYYY-MM-DD`；常比 `publication_date` 早一天；标题无日期时填 null。Response to Media Queries 标题中的日期是事件日期，一律填 null |
 | url | 字符串 | 详情页网址 |
 | tags | 字符串列表 | 网站标签，没有则为空列表 |
-| spokesperson | 字符串或 null | 发言人姓名，从正文中 "Shri ……, Official Spokesperson" 一类表述提取；找不到填 null |
+| spokesperson | 字符串或 null | 发言人姓名（不含 Shri/Sh./Mr. 等称谓，拼写原样保留），从正文中第一处明确标明发言人身份的表述提取："Shri ……, Official Spokesperson"、"Official Spokesperson Shri ……"、"Official Spokesperson, ……"、"MEA Spokesperson ……"（不区分大小写）；只写 "Official Spokesperson said" 而无姓名、或正文未出现发言人身份的，填 null |
 | content | 字符串 | 清洗后的正文，规则见第六节 |
 | raw_file | 字符串 | 对应整页原始 HTML 文件的相对路径 |
 | raw_fragment_file | 字符串 | 对应正文片段 HTML 文件的相对路径 |

@@ -17,15 +17,23 @@ BLOCK_TAGS = {
 }
 HTML_WS = re.compile(r"[ \t\n\r\f]+")  # HTML 中的空白（不含 &nbsp;）在渲染时折叠为一个空格
 
+_HON = r"(?:Shri|Sh\.?|Mr\.?|Dr\.?)"
+_NAME = r"([A-Z][A-Za-z\-]+(?:\s+[A-Z][A-Za-z\-]+){0,3})"
 SPOKESPERSON_PATTERNS = [
-    # "Shri Randhir Jaiswal, Official Spokesperson" / "Sh. Anurag Srivastava, Official Spokesperson"
-    re.compile(r"\b(?:Shri|Sh\.|Mr\.|Dr\.)\s*([A-Z][A-Za-z.\-]*(?:\s+[A-Z][A-Za-z.\-]*){0,3})\s*,\s*Official Spokesperson"),
-    # "Official Spokesperson Shri Randhir Jaiswal said"
-    re.compile(r"Official Spokesperson,?\s+(?:Shri|Sh\.|Mr\.|Dr\.)\s*([A-Z][A-Za-z.\-]*(?:\s+[A-Z][A-Za-z.\-]*){0,3})"),
+    # "Shri Randhir Jaiswal, Official Spokesperson" / "Sh Anurag Srivastava, (Official Spokesperson)"
+    re.compile(rf"\b{_HON}\s*{_NAME}\s*,\s*\(?\s*(?i:Official Spokesperson)"),
+    # "Official Spokesperson Shri Randhir Jaiswal said" / "Official Spokesperson, Raveesh Kumar:" / "MEA Spokesperson Raveesh Kumar said"
+    re.compile(rf"(?i:Official|MEA)\s+(?i:Spokesperson)\s*,?\s+(?:{_HON}\s*)?{_NAME}"),
 ]
 
-TITLE_DATE = re.compile(r"\(([^()]*\d{4})\s*\)")  # 取标题中最后一个以年份结尾的括号
-TITLE_DATE_FORMATS = ["%B %d, %Y", "%B %d %Y", "%d %B, %Y", "%d %B %Y", "%b %d, %Y", "%d %b %Y", "%b. %d, %Y"]
+_MONTH = r"(?:Jan|Feb|Mar|Apr|May|Jun|Jul|Aug|Sep|Sept|Oct|Nov|Dec)[a-z]*\.?"
+# 标题中的日期写法："January 30, 2020"、"18 June 2020"、"11th December 2020"、"19th Nov 2020"、"06-June-2022"
+TITLE_DATE = re.compile(
+    rf"(?:{_MONTH}\s+\d{{1,2}}(?:st|nd|rd|th)?,?\s+\d{{4}}"
+    rf"|\d{{1,2}}(?:st|nd|rd|th)?[\s-]+{_MONTH},?[\s-]+\d{{4}})",
+    re.I,
+)
+TITLE_DATE_FORMATS = ["%B %d %Y", "%d %B %Y", "%b %d %Y", "%d %b %Y"]
 
 
 def doc_type(section: Section, title: str) -> str:
@@ -40,9 +48,19 @@ def doc_type(section: Section, title: str) -> str:
 
 
 def briefing_date(title: str) -> str | None:
+    """取标题中最后一个可识别的日期（括号内外均可），统一为 YYYY-MM-DD；没有则返回 None。"""
     found = TITLE_DATE.findall(title)
     if not found:
         return None
+    raw = re.sub(r"(\d)(st|nd|rd|th)\b", r"\1", found[-1], flags=re.I)
+    raw = re.sub(r"\bSept\b", "Sep", raw.replace(",", " ").replace("-", " ").replace(".", " "), flags=re.I)
+    raw = " ".join(raw.split())
+    for fmt in TITLE_DATE_FORMATS:
+        try:
+            return datetime.strptime(raw, fmt).date().isoformat()
+        except ValueError:
+            pass
+    return None
     raw = " ".join(re.sub(r"\bSept\b", "Sep", found[-1]).split())
     for fmt in TITLE_DATE_FORMATS:
         try:
@@ -155,7 +173,8 @@ def build_documents() -> tuple[list[dict], list[dict], list[dict]]:
                 warn(doc_id, "tag_mismatch", "详情页标签与列表标签不一致")
             if p["title"] != row["title"]:
                 warn(doc_id, "title_mismatch", f"详情页标题与列表标题不一致（列表：{row['title']}）")
-            bdate = briefing_date(p["title"])
+            # 答记者问标题中的日期是事件日期，不是记者会日期
+            bdate = briefing_date(p["title"]) if section.name == "transcripts" else None
             if section.name == "transcripts" and bdate is None:
                 warn(doc_id, "no_briefing_date", "标题中未解析出记者会日期")
             if log.get("error"):
