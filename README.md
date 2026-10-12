@@ -50,6 +50,7 @@
 - 详情页网址格式：`https://www.mea.gov.in/media-briefings?dtl/{编号}/{标题slug}`、`https://www.mea.gov.in/response-to-queries?dtl/{编号}/{标题slug}`。
 - 探查时范围内条数：Transcripts 458 篇（全站 3217），Response to Media Queries 222 篇（全站 392），网址无重复。
 - 2020—2021 年老页面段落多以 `<br>` 分隔而非 `<p>`。
+- **列表外篇目**：网站上存在详情页可以访问、但不出现在任何列表（栏目列表和"全部媒体"列表）中的文章。已确认 2 篇：2025-10-16 例行记者会（编号 40219）和 2025-10-30 例行记者会（编号 40245），是经 GlobalSecurity 交叉核对发现的；40219 的标签为空，推测未设标签的文章不进列表。只按列表抓取会漏掉这类文章。
 
 **备用核对来源**：GlobalSecurity.org 转载了外交部的例行记者会实录，网址规律为 `globalsecurity.org/wmd/library/news/india/年份/india-年月日-india-meab01.htm`，例如 https://www.globalsecurity.org/wmd/library/news/india/2024/india-240912-india-meab01.htm 。它只用于核对篇数或补缺，不作为正式数据来源。注意网址里的日期是转载日期，可能比记者会晚一天，日期一律以正文标题为准。
 
@@ -183,3 +184,49 @@ mea_data/
 - 遇到本说明没有覆盖的情况，例如网站结构和描述不符、某类页面格式特殊，请先记录下来问我，不要自行决定处理方式。
 - 数据仅用于学术研究，抓取时请控制频率，不要对网站造成负担。
 - 截止日期：待定。
+
+## 十、施工进度与记录
+
+项目名：MEA_Spokesperson_Crawler（代码仓库 `git@github.com:TerraRiver/MEA_Spokesperson_Crawler.git`；运行说明见 `USAGE.md`）。
+
+### 进度（截至 2026-10-12）
+
+| 步骤 | 状态 | 结果 |
+| --- | --- | --- |
+| 网站结构探查 | 完成 | 见第三节"网站结构" |
+| 样例交付 | 完成 | 两个栏目各最新 10 篇，已确认 |
+| 全量抓取 | 完成 | 680 / 680 篇成功，0 失败（Transcripts 458、Response to Media Queries 222），用时约 40 分钟；原始 HTML 约 339MB |
+| 解析 | 完成 | weekly_briefing 186、special_briefing 243、other_briefing 29、media_response 222；无空正文、无重复、无仅 PDF 附件的篇目 |
+| 人工抽查 | 完成 | 随机 10 篇在浏览器中与原页面逐词比对，全部通过 |
+| GlobalSecurity 交叉核对 | 完成 | 145 个无例行记者会的周中探到 102 篇转载：已收录 99、标题措辞不同但为同一篇 1、列表外篇目 2（见下） |
+| 质量检查报告 | 完成 | `mea_data/check_report.md` |
+| 列表外篇目处理 | **待定** | 见"待确认事项" |
+| 发言轮次切分（可选） | 未开始 | 需先确认 |
+
+### 已确认的决定
+
+| 事项 | 决定 |
+| --- | --- |
+| 技术栈 | Python + Selenium |
+| `id` 格式 | `mea_{section}_{网站编号}` |
+| 总数核对口径 | 列表在时间范围内的条数，例行记者会另用 GlobalSecurity 核对 |
+| 样例 | 两个栏目各取时间范围内最新 10 篇 |
+| `publication_date` | 页面日期；标题中的记者会日期另存 `briefing_date` |
+| `doc_type` | special_briefing 放宽为 `special.*briefing` |
+| 多语言版本 | 不统计；正文末尾 "Click here for Xxx version" 的其他语言 PDF 链接从 `content` 去除，落款保留 |
+| 原始 HTML | 渲染整页与详情接口片段两份都存 |
+| 原文缺字符（如缺撇号） | 按"一字不改"原样保留 |
+
+### 已知数据特点
+
+- 例行记者会为 0 篇的月份：2020-04（疫情期间暂停，5 月起改为线上）、2023-05（GlobalSecurity 在该月也只有专题吹风会转载）。
+- 2020 年有几篇标题为 "Readout/Statement … during the (Virtual) Weekly Media Briefing" 的篇目，按规则归为 `weekly_briefing`，但内容是单段发言而非完整实录；另有 2 篇 "Readout by the Official Spokesperson on India-China LAC Issue"（2020-08、2020-09）归为 `other_briefing`。
+- `spokesperson` 为 null 的 66 篇：原文只写 "Official Spokesperson said" 而无姓名，或正文未出现发言人身份。
+- `briefing_date` 为 null 的 20 篇 Transcripts：标题中本来没有日期。
+- 个别标题原文异常：2025-12-26 例行记者会列表标题末尾带 "Edited By admin"（详情页标题无此后缀，以详情页为准）；1 篇正文把发言人拼作 "Arindam Baghchi"，原样保留。
+
+### 待确认事项
+
+1. 列表外的 2 篇例行记者会（40219、40245）是否补入数据集。建议补入：按编号直接抓详情，记录中注明来源为"列表外，经 GlobalSecurity 发现"，并在质量检查报告中单独列出。
+2. 是否系统排查其他列表外篇目：取得"全部媒体"列表在时间范围内的全部编号，逐个探测编号 32253—40987 之间的空缺，再按标题和内容归入栏目。预计探测一两千个编号，耗时 1—2 小时。核对当天后段网站响应变慢、个别请求返回空内容，宜另择时段进行。
+
