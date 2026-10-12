@@ -88,6 +88,40 @@ def read_list_csv(section: Section) -> list[dict]:
         return list(csv.DictReader(f))
 
 
+# 列表外补充篇目：详情页存在但不出现在网站任何列表中，按编号直接抓取
+SUPPLEMENTS: dict[str, list[dict]] = {
+    "transcripts": [
+        {
+            "doc_no": "40219",
+            "title": "Transcript of Weekly Media Briefing by the Official Spokesperson (October 16, 2025)",
+            "list_date": "2025-10-16",
+            "url": BASE_URL + "/media-briefings?dtl/40219/Transcript_of_Weekly_Media_Briefing_by_the_Official_Spokesperson_October_16_2025",
+            "note": "列表外篇目，经 GlobalSecurity 交叉核对发现（转载日期 2025-10-16）",
+        },
+        {
+            "doc_no": "40245",
+            "title": "Transcript of Weekly Media Briefing by the Official Spokesperson (October 30, 2025)",
+            "list_date": "2025-10-30",
+            "url": BASE_URL + "/media-briefings?dtl/40245/Transcript_of_Weekly_Media_Briefing_by_the_Official_Spokesperson_October_30_2025",
+            "note": "列表外篇目，经 GlobalSecurity 交叉核对发现（转载日期 2025-10-30）",
+        },
+    ],
+    "media_responses": [],
+}
+
+
+def read_rows(section: Section) -> list[dict]:
+    """待抓取/解析的全部篇目：网站列表（source=site_list）+ 列表外补充（source=supplement）。"""
+    rows = [dict(r, source="site_list", note="") for r in read_list_csv(section)]
+    listed = {r["doc_no"] for r in rows}
+    for sup in SUPPLEMENTS.get(section.name, []):
+        if sup["doc_no"] in listed:
+            print(f"  提示：补充篇目 {section.name} {sup['doc_no']} 已出现在网站列表中，按列表处理")
+            continue
+        rows.append(dict(sup, section=section.name, list_date_raw="", tags="", source="supplement"))
+    return rows
+
+
 def crawl_lists(headless: bool = True):
     with Browser(headless=headless) as b:
         for section in SECTIONS.values():

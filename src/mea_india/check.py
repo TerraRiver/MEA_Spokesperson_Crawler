@@ -13,7 +13,7 @@ from datetime import date, datetime
 from .config import CHECK_REPORT, DATA_DIR, END_DATE, SECTIONS, START_DATE
 from .details import latest_log_by_doc
 from .globalsec import GS_RESULT
-from .lists import read_list_csv
+from .lists import read_rows
 from .parse import build_documents
 
 SPOT_CHECK = DATA_DIR / "spot_check.json"
@@ -89,17 +89,19 @@ def generate_report():
     # 1. 总数核对
     w("## 1. 总数核对\n")
     w("核对口径：列表接口在时间范围内返回的条数（网站显示的总数包含全部年份，不直接用于核对）。\n")
-    w("| 栏目 | 列表条数 | 最终入库 | 去重删除 | 缺失 |")
-    w("| --- | --- | --- | --- | --- |")
-    missing_all = []
+    w("| 栏目 | 列表条数 | 列表外补充 | 最终入库 | 去重删除 | 缺失 |")
+    w("| --- | --- | --- | --- | --- | --- |")
+    missing_all, supplements = [], []
     for s in SECTIONS.values():
-        rows = read_list_csv(s)
+        rows = read_rows(s)
+        n_list = sum(r["source"] == "site_list" for r in rows)
+        supplements += [(f"mea_{s.name}_{r['doc_no']}", r) for r in rows if r["source"] == "supplement"]
         ids = {f"mea_{s.name}_{r['doc_no']}" for r in rows}
         got = {d["id"] for d in docs if d["section"] == s.name}
         dup = {i for i in removed_ids if i.startswith(f"mea_{s.name}_")}
         missing = sorted(ids - got - dup)
         missing_all += [(i, r) for r in rows for i in [f"mea_{s.name}_{r['doc_no']}"] if i in missing]
-        w(f"| {s.name} | {len(rows)} | {len(got)} | {len(dup)} | {len(missing)} |")
+        w(f"| {s.name} | {n_list} | {len(rows) - n_list} | {len(got)} | {len(dup)} | {len(missing)} |")
     w("")
     if missing_all:
         w("缺失篇目：\n")
@@ -107,7 +109,13 @@ def generate_report():
             w(f"- `{i}` {r['list_date']} {md_escape(r['title'])}")
         w("")
     else:
-        w("列表中的篇目全部入库。\n")
+        w("列表中的篇目和列表外补充篇目全部入库。\n")
+    if supplements:
+        w("列表外补充篇目（详情页存在但不出现在网站任何列表中，按编号直接抓取；记录中 `source` 为 `supplement`）：\n")
+        for i, r in supplements:
+            status = "已入库" if i in by_id else "未入库"
+            w(f"- `{i}` {r['list_date']} {md_escape(r['title'])}（{status}；{r['note']}）")
+        w("")
 
     w("### GlobalSecurity.org 交叉核对（例行记者会）\n")
     if GS_RESULT.exists():

@@ -9,7 +9,7 @@ from selenium.common.exceptions import TimeoutException, WebDriverException
 
 from .browser import Browser
 from .config import CRAWL_LOG, DATA_DIR, RAW_DIR, SECTIONS, Section, detail_api_url
-from .lists import read_list_csv
+from .lists import read_rows
 
 LOG_FIELDS = ["section", "doc_no", "url", "crawl_time", "success", "error", "raw_file", "raw_fragment_file"]
 
@@ -88,7 +88,7 @@ def crawl_details(limit: int | None = None, only_failed: bool = False, headless:
     latest = latest_log_by_doc()
     todo: list[tuple[Section, dict]] = []
     for section in SECTIONS.values():
-        rows = sorted(read_list_csv(section), key=lambda r: (r["list_date"], int(r["doc_no"] or 0)), reverse=True)
+        rows = sorted(read_rows(section), key=lambda r: (r["list_date"], int(r["doc_no"] or 0)), reverse=True)
         if limit:
             rows = rows[:limit]
         for row in rows:

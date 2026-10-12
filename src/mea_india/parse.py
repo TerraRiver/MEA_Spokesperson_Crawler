@@ -8,7 +8,7 @@ from bs4 import BeautifulSoup, NavigableString, Tag
 
 from .config import DATA_DIR, DOCS_JSON, SECTIONS, Section
 from .details import latest_log_by_doc, raw_paths
-from .lists import TAG_SEP, parse_page_date, read_list_csv
+from .lists import TAG_SEP, parse_page_date, read_rows
 
 # 渲染时会产生换行的块级元素
 BLOCK_TAGS = {
@@ -157,7 +157,7 @@ def build_documents() -> tuple[list[dict], list[dict], list[dict]]:
         warnings.append({"id": doc_id, "kind": kind, "message": message})
 
     for section in SECTIONS.values():
-        for row in read_list_csv(section):
+        for row in read_rows(section):
             log = latest.get((section.name, row["doc_no"]))
             page_path, frag_path = raw_paths(section, row)
             if not (log and log["success"] == "True" and frag_path.exists()):
@@ -169,9 +169,9 @@ def build_documents() -> tuple[list[dict], list[dict], list[dict]]:
             if p["pdf_links"]:
                 warn(doc_id, "pdf_link", f"正文含 PDF 链接：{', '.join(p['pdf_links'])}")
             list_tags = row["tags"].split(TAG_SEP) if row["tags"] else []
-            if p["tags"] != list_tags:
+            if row["source"] == "site_list" and p["tags"] != list_tags:
                 warn(doc_id, "tag_mismatch", "详情页标签与列表标签不一致")
-            if p["title"] != row["title"]:
+            if row["source"] == "site_list" and p["title"] != row["title"]:
                 warn(doc_id, "title_mismatch", f"详情页标题与列表标题不一致（列表：{row['title']}）")
             # 答记者问标题中的日期是事件日期，不是记者会日期
             bdate = briefing_date(p["title"]) if section.name == "transcripts" else None
@@ -193,6 +193,7 @@ def build_documents() -> tuple[list[dict], list[dict], list[dict]]:
                 "raw_file": str(page_path.relative_to(DATA_DIR)),
                 "raw_fragment_file": str(frag_path.relative_to(DATA_DIR)),
                 "crawl_time": log["crawl_time"],
+                "source": row["source"],
             })
     docs.sort(key=lambda d: (d["publication_date"], d["section"], int(d["id"].rsplit("_", 1)[1])))
 
