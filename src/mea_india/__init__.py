@@ -13,6 +13,8 @@ def main() -> None:
     p_fetch.add_argument("--only-failed", action="store_true", help="只补爬日志中失败过的篇目")
 
     sub.add_parser("parse", help="解析本地原始 HTML -> mea_data/mea_documents.json")
+    sub.add_parser("globalsec", help="用 GlobalSecurity.org 核对没有例行记者会的周")
+    sub.add_parser("check", help="生成质量检查报告 -> mea_data/check_report.md")
 
     args = parser.parse_args()
     headless = not args.headed
@@ -29,3 +31,11 @@ def main() -> None:
         from .parse import write_documents
 
         write_documents()
+    elif args.cmd == "globalsec":
+        from .globalsec import run_globalsecurity_check
+
+        run_globalsecurity_check(headless=headless)
+    elif args.cmd == "check":
+        from .check import generate_report
+
+        generate_report()

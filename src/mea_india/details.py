@@ -113,5 +113,5 @@ def crawl_details(limit: int | None = None, only_failed: bool = False, headless:
             else:
                 fail += 1
             print(f"[{i}/{len(todo)}] {section.name} {row['list_date']} {row['doc_no']} "
-                  f"{'OK' if entry['success'] == 'True' else 'FAIL ' + entry['error']}")
+                  f"{'OK' if entry['success'] == 'True' else 'FAIL ' + entry['error']}", flush=True)
     print(f"完成：成功 {ok}，失败 {fail}")

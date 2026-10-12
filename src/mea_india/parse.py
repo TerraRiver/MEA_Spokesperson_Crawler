@@ -24,7 +24,7 @@ SPOKESPERSON_PATTERNS = [
     re.compile(r"Official Spokesperson,?\s+(?:Shri|Sh\.|Mr\.|Dr\.)\s*([A-Z][A-Za-z.\-]*(?:\s+[A-Z][A-Za-z.\-]*){0,3})"),
 ]
 
-TITLE_DATE = re.compile(r"\(([^()]*\d{4})\s*\)\s*$")
+TITLE_DATE = re.compile(r"\(([^()]*\d{4})\s*\)")  # 取标题中最后一个以年份结尾的括号
 TITLE_DATE_FORMATS = ["%B %d, %Y", "%B %d %Y", "%d %B, %Y", "%d %B %Y", "%b %d, %Y", "%d %b %Y", "%b. %d, %Y"]
 
 
@@ -40,10 +40,10 @@ def doc_type(section: Section, title: str) -> str:
 
 
 def briefing_date(title: str) -> str | None:
-    m = TITLE_DATE.search(title.strip())
-    if not m:
+    found = TITLE_DATE.findall(title)
+    if not found:
         return None
-    raw = " ".join(m.group(1).replace("Sept", "Sep").split())
+    raw = " ".join(re.sub(r"\bSept\b", "Sep", found[-1]).split())
     for fmt in TITLE_DATE_FORMATS:
         try:
             return datetime.strptime(raw, fmt).date().isoformat()
