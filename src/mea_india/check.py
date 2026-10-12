@@ -8,7 +8,7 @@ import json
 import random
 import re
 from collections import Counter, defaultdict
-from datetime import datetime
+from datetime import date, datetime
 
 from .config import CHECK_REPORT, DATA_DIR, END_DATE, SECTIONS, START_DATE
 from .details import latest_log_by_doc
@@ -21,6 +21,43 @@ SPOT_SEED = 20260331
 SHORT_CONTENT = 200
 # 天城文、孟加拉文等印度文字及阿拉伯文（乌尔都语）
 NON_LATIN_SCRIPT = re.compile(r"[\u0900-\u0DFF\u0600-\u06FF]")
+
+
+GS_DAY_WINDOW = 2
+GS_SIM = 0.9
+
+
+def _norm_title(t: str) -> str:
+    t = t.lower().replace("’", "'").replace("'", "")
+    t = re.sub(r"\([^()]*\d{4}\)", "", t)  # 去掉括号日期
+    return re.sub(r"[^a-z0-9]+", " ", t).strip()
+
+
+def dedupe_found(found: list[dict]) -> list[dict]:
+    seen, out = set(), []
+    for f in found:
+        if f["url"] not in seen:
+            seen.add(f["url"])
+            out.append(f)
+    return out
+
+
+def gs_match(f: dict, docs: list[dict]) -> tuple[dict, str, str]:
+    from difflib import SequenceMatcher
+
+    gd = date.fromisoformat(f["gs_date"])
+    near = [d for d in docs if d["section"] == "transcripts"
+            and abs((date.fromisoformat(d["publication_date"]) - gd).days) <= GS_DAY_WINDOW]
+    best, score = None, 0.0
+    for d in near:
+        r = SequenceMatcher(None, _norm_title(f["title"]), _norm_title(d["title"])).ratio()
+        if r > score:
+            best, score = d, r
+    if best and score >= GS_SIM:
+        return f, "已收录", f"`{best['id']}`"
+    if near:
+        return f, "需人工确认", "；".join(f"`{d['id']}` {d['title']}" for d in near)
+    return f, "疑似漏抓", ""
 
 
 def months_in_range() -> list[str]:
@@ -76,15 +113,20 @@ def generate_report():
     if GS_RESULT.exists():
         gs = json.loads(GS_RESULT.read_text(encoding="utf-8"))
         w(f"方法：对数据中没有 `weekly_briefing` 的周（共 {len(gs['gap_weeks'])} 个），逐日探测 GlobalSecurity 转载网址"
-          "（含次周周一，因转载可能晚一天）。\n")
-        if gs["found"]:
-            w("| 空周（周一） | GlobalSecurity 日期 | 标题 | 网址 |")
+          "（含次周周一，因转载可能晚一天）。该网址也转载专题吹风会等，探到的篇目逐一与本数据比对："
+          f"日期相差 {GS_DAY_WINDOW} 天以内且标题相似度 ≥ {GS_SIM}，记为“已收录”；"
+          "同期有篇目但标题不同，记为“需人工确认”；同期无任何篇目，记为“疑似漏抓”。"
+          "注意 GlobalSecurity 覆盖不完整（2020 年基本缺失），未探到不代表没有发布。\n")
+        matches = [gs_match(f, docs) for f in dedupe_found(gs["found"])]
+        if matches:
+            w(f"| GlobalSecurity 日期 | GlobalSecurity 标题 | 结论 | 本数据对应篇目 |")
             w("| --- | --- | --- | --- |")
-            for f in gs["found"]:
-                w(f"| {f['week']} | {f['gs_date']} | {md_escape(f['title'])} | {f['url']} |")
-            w("\n以上篇目需回到外交部网站确认是否漏抓。\n")
+            for f, verdict, ref in matches:
+                w(f"| {f['gs_date']} | {md_escape(f['title'])} | {verdict} | {md_escape(ref)} |")
+            c = Counter(v for _, v, _ in matches)
+            w(f"\n合计 {len(matches)} 篇：" + "，".join(f"{k} {n}" for k, n in c.items()) + "。\n")
         else:
-            w("空周内 GlobalSecurity 上均未找到转载，未发现漏抓。\n")
+            w("空周内 GlobalSecurity 上均未找到转载。\n")
     else:
         w("**未执行**（运行 `mea-india globalsec` 后重新生成报告）。\n")
 
