@@ -5,9 +5,7 @@ import traceback
 from datetime import datetime
 from pathlib import Path
 
-from selenium.common.exceptions import TimeoutException, WebDriverException
-
-from .browser import Browser
+from .browser import Browser, BrowserError, SelectorTimeoutError
 from .config import CRAWL_LOG, DATA_DIR, RAW_DIR, SECTIONS, Section, detail_api_url
 from .lists import read_rows
 
@@ -61,9 +59,9 @@ def fetch_one(browser: Browser, section: Section, row: dict) -> dict:
     try:
         try:
             page = browser.open(row["url"], wait_css=".pressReleaseContent .description")
-        except TimeoutException:
+        except SelectorTimeoutError:
             # 没有 .description 的特殊页面（如只有 PDF）也要保存下来，交给解析和质检处理
-            page = browser.driver.page_source
+            page = browser.page_source
             entry["error"] = "等待 .description 超时；"
 
         fragment = browser.captured_response(f"FetchPublicationDetailData?pkid={row['doc_no']}&")
@@ -77,7 +75,7 @@ def fetch_one(browser: Browser, section: Section, row: dict) -> dict:
         page_path.write_text(page, encoding="utf-8")
         frag_path.write_text(fragment, encoding="utf-8")
         entry["success"] = "True"
-    except (WebDriverException, RuntimeError, OSError) as e:
+    except (BrowserError, RuntimeError, OSError) as e:
         entry["error"] += f"{type(e).__name__}: {str(e).splitlines()[0] if str(e) else ''}"
         traceback.print_exc(limit=1)
     return entry

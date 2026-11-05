@@ -61,13 +61,6 @@ def briefing_date(title: str) -> str | None:
         except ValueError:
             pass
     return None
-    raw = " ".join(re.sub(r"\bSept\b", "Sep", found[-1]).split())
-    for fmt in TITLE_DATE_FORMATS:
-        try:
-            return datetime.strptime(raw, fmt).date().isoformat()
-        except ValueError:
-            pass
-    return None
 
 
 def html_to_text(node: Tag) -> str:

@@ -6,17 +6,18 @@
 
 - macOS / Linux / Windows，Python 3.12（见 `.python-version`）
 - [uv](https://docs.astral.sh/uv/) 管理依赖
-- Google Chrome（Selenium 4 会自动下载匹配的 chromedriver）
+- 本机已安装 Google Chrome（默认优先调用；不可用时回退至 Playwright Chromium，可通过 `uv run playwright install chromium` 安装）
 
-依赖包（见 `pyproject.toml`）：`selenium`、`beautifulsoup4`、`lxml`。
+依赖包（见 `pyproject.toml`）：`playwright`、`beautifulsoup4`、`lxml`。
 
 ```bash
 uv sync
+uv run playwright install chromium
 ```
 
 ## 运行步骤
 
-所有命令默认无头模式运行 Chrome，加 `--headed` 可显示浏览器窗口（如 `uv run mea-india --headed fetch`）。
+所有命令默认无头模式运行浏览器，加 `--headed` 可显示浏览器窗口（如 `uv run mea-india --headed fetch`）。
 
 | 步骤 | 命令 | 产出 |
 | --- | --- | --- |
@@ -37,7 +38,8 @@ uv sync
 ```
 src/mea_india/
 ├── config.py     路径、栏目编号、时间范围、接口地址
-├── browser.py    Selenium 封装：限速、页面内同源请求、从网络日志取接口原始响应
+├── stealth.py    指纹隐匿补丁（STEALTH_INIT_SCRIPT）与生物力学鼠标/滚轮拟真操作
+├── browser.py    Playwright 封装：优先本机 Chrome、限速、429/503 退避重试、页面内同源请求、捕获接口原始响应
 ├── lists.py      列表抓取与解析
 ├── details.py    详情抓取、抓取日志、断点续爬
 ├── parse.py      正文清洗、字段提取、去重
