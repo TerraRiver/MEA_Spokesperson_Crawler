@@ -4,6 +4,7 @@ import csv
 import math
 import re
 from datetime import datetime
+from urllib.parse import urljoin
 
 from bs4 import BeautifulSoup
 
@@ -32,15 +33,19 @@ def parse_list_fragment(text: str, section: Section) -> tuple[list[dict], int | 
     for box in soup.select(".pressRelesastBox"):
         a = box.select_one(".pressTitle a")
         href = a["href"]
+        title = HTML_WS.sub(" ", a.get_text()).replace("\xa0", " ").strip()
         m = re.search(r"dtl/(\d+)", href)
+        if not m:
+            print(f"  ⚠ {section.name}：列表项链接未解析出数字编号，已跳过：{href} ({title})")
+            continue
         raw_date = box.select_one(".date").get_text(strip=True)
         rows.append({
             "section": section.name,
-            "doc_no": m.group(1) if m else "",
-            "title": HTML_WS.sub(" ", a.get_text()).replace("\xa0", " ").strip(),
+            "doc_no": m.group(1),
+            "title": title,
             "list_date": parse_page_date(raw_date).isoformat(),
             "list_date_raw": raw_date,
-            "url": BASE_URL + href,
+            "url": urljoin(BASE_URL, href),
             "tags": TAG_SEP.join(t.get_text(strip=True) for t in box.select(".tags a")),
         })
     return rows, total

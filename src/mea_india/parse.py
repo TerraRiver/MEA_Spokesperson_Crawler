@@ -4,7 +4,7 @@ import json
 import re
 from datetime import datetime
 
-from bs4 import BeautifulSoup, NavigableString, Tag
+from bs4 import BeautifulSoup, Comment, Declaration, Doctype, NavigableString, ProcessingInstruction, Tag
 
 from .config import DATA_DIR, DOCS_JSON, SECTIONS, Section
 from .details import latest_log_by_doc, raw_paths
@@ -18,13 +18,16 @@ BLOCK_TAGS = {
 HTML_WS = re.compile(r"[ \t\n\r\f]+")  # HTML 中的空白（不含 &nbsp;）在渲染时折叠为一个空格
 
 _HON = r"(?:Shri|Sh\.?|Mr\.?|Dr\.?)"
-_NAME = r"([A-Z][A-Za-z\-]+(?:\s+[A-Z][A-Za-z\-]+){0,3})"
+_NAME = r"([A-Z][A-Za-z\-]+(?:[ \t]+[A-Z][A-Za-z\-]+){0,3})"
 SPOKESPERSON_PATTERNS = [
     # "Shri Randhir Jaiswal, Official Spokesperson" / "Sh Anurag Srivastava, (Official Spokesperson)"
-    re.compile(rf"\b{_HON}\s*{_NAME}\s*,\s*\(?\s*(?i:Official Spokesperson)"),
+    re.compile(rf"\b{_HON}[ \t]*{_NAME}[ \t]*,[ \t]*\(?[ \t]*(?i:Official Spokesperson)"),
     # "Official Spokesperson Shri Randhir Jaiswal said" / "Official Spokesperson, Raveesh Kumar:" / "MEA Spokesperson Raveesh Kumar said"
-    re.compile(rf"(?i:Official|MEA)\s+(?i:Spokesperson)\s*,?\s+(?:{_HON}\s*)?{_NAME}"),
+    re.compile(rf"(?i:Official|MEA)[ \t]+(?i:Spokesperson)[ \t]*,?[ \t]+(?:{_HON}[ \t]*)?{_NAME}"),
 ]
+SPOKESPERSON_ALIASES = {
+    "Arindam Baghchi": "Arindam Bagchi",
+}
 
 _MONTH = r"(?:Jan|Feb|Mar|Apr|May|Jun|Jul|Aug|Sep|Sept|Oct|Nov|Dec)[a-z]*\.?"
 # 标题中的日期写法："January 30, 2020"、"18 June 2020"、"11th December 2020"、"19th Nov 2020"、"06-June-2022"
@@ -70,7 +73,7 @@ def html_to_text(node: Tag) -> str:
     def walk(el):
         for child in el.children:
             if isinstance(child, NavigableString):
-                if child.__class__.__name__ in ("Comment", "Doctype", "Declaration", "ProcessingInstruction"):
+                if isinstance(child, (Comment, Doctype, Declaration, ProcessingInstruction)):
                     continue
                 parts.append(HTML_WS.sub(" ", str(child)))
             elif isinstance(child, Tag):
@@ -99,7 +102,8 @@ def find_spokesperson(content: str) -> str | None:
     for pat in SPOKESPERSON_PATTERNS:
         m = pat.search(content)
         if m:
-            return m.group(1).strip()
+            name = m.group(1).strip()
+            return SPOKESPERSON_ALIASES.get(name, name)
     return None
 
 
@@ -188,7 +192,11 @@ def build_documents() -> tuple[list[dict], list[dict], list[dict]]:
                 "crawl_time": log["crawl_time"],
                 "source": row["source"],
             })
-    docs.sort(key=lambda d: (d["publication_date"], d["section"], int(d["id"].rsplit("_", 1)[1])))
+    def _doc_sort_key(d: dict) -> tuple[str, str, int, str]:
+        no = d["id"].rsplit("_", 1)[1]
+        return (d["publication_date"], d["section"], int(no) if no.isdigit() else 0, no)
+
+    docs.sort(key=_doc_sort_key)
 
     # 去重：网址相同或正文完全相同（非空）的只保留第一条
     kept, removed, seen_url, seen_content = [], [], {}, {}

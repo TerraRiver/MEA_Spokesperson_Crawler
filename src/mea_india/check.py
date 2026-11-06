@@ -72,8 +72,18 @@ def md_escape(s: str) -> str:
     return s.replace("|", "\\|").replace("\n", " ")
 
 
-def spot_sample(docs: list[dict]) -> list[dict]:
-    return random.Random(SPOT_SEED).sample(docs, min(10, len(docs)))
+def spot_sample(docs: list[dict], spot: dict) -> tuple[list[dict], list[str]]:
+    """优先使用 spot_check.json 中已固定的抽样 ID，文件不存在或为空时按随机种子抽取并写入固定 ID。"""
+    by_id = {d["id"]: d for d in docs}
+    if spot:
+        fixed = [by_id[doc_id] for doc_id in spot if doc_id in by_id]
+        missing_spot = [doc_id for doc_id in spot if doc_id not in by_id]
+        return fixed, missing_spot
+    sampled = random.Random(SPOT_SEED).sample(docs, min(10, len(docs)))
+    if sampled:
+        init_spot = {d["id"]: {"result": "待核对", "note": ""} for d in sampled}
+        SPOT_CHECK.write_text(json.dumps(init_spot, ensure_ascii=False, indent=2), encoding="utf-8")
+    return sampled, []
 
 
 def generate_report():
@@ -135,6 +145,12 @@ def generate_report():
             w(f"\n合计 {len(matches)} 篇：" + "，".join(f"{k} {n}" for k, n in c.items()) + "。\n")
         else:
             w("空周内 GlobalSecurity 上均未找到转载。\n")
+        gs_errors = gs.get("errors", [])
+        if gs_errors:
+            w(f"探测期间非 200/404 的异常响应（{len(gs_errors)} 次）：\n")
+            for err in gs_errors:
+                w(f"- {err['gs_date']} HTTP {err['status']}：{err['url']}")
+            w("")
     else:
         w("**未执行**（运行 `mea-india globalsec` 后重新生成报告）。\n")
 
@@ -219,10 +235,13 @@ def generate_report():
     # 7. 人工抽查
     w("## 7. 人工抽查\n")
     spot = json.loads(SPOT_CHECK.read_text(encoding="utf-8")) if SPOT_CHECK.exists() else {}
-    w(f"随机抽取 10 篇（随机种子 {SPOT_SEED}），与网站原页面逐篇对照标题、日期和正文。\n")
+    sampled_docs, missing_spot_ids = spot_sample(docs, spot)
+    w(f"随机抽取 {len(sampled_docs)} 篇（随机种子 {SPOT_SEED}，抽样 ID 固定于 `{SPOT_CHECK.name}`），与网站原页面逐篇对照标题、日期和正文。\n")
+    if missing_spot_ids:
+        w(f"⚠ `{SPOT_CHECK.name}` 中有 {len(missing_spot_ids)} 个固定 ID 未在当前文档集中找到：{', '.join(f'`{i}`' for i in missing_spot_ids)}\n")
     w("| id | 日期 | 标题 | 结果 | 说明 |")
     w("| --- | --- | --- | --- | --- |")
-    for d in spot_sample(docs):
+    for d in sampled_docs:
         r = spot.get(d["id"], {})
         w(f"| `{d['id']}` | {d['publication_date']} | {md_escape(d['title'])} | {r.get('result', '待核对')} | {md_escape(r.get('note', ''))} |")
     w("")

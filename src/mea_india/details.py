@@ -1,6 +1,8 @@
 """逐篇抓取详情页：保存渲染后整页 + 详情接口原始片段，写抓取日志，支持断点续爬。"""
 
 import csv
+import random
+import time
 import traceback
 from datetime import datetime
 from pathlib import Path
@@ -10,6 +12,11 @@ from .config import CRAWL_LOG, DATA_DIR, RAW_DIR, SECTIONS, Section, detail_api_
 from .lists import read_rows
 
 LOG_FIELDS = ["section", "doc_no", "url", "crawl_time", "success", "error", "raw_file", "raw_fragment_file"]
+MAX_CONSECUTIVE_FAILS = 5
+
+
+def _doc_no_sort_key(doc_no: str) -> tuple[int, str]:
+    return (int(doc_no) if doc_no.isdigit() else 0, doc_no)
 
 
 def raw_paths(section: Section, row: dict) -> tuple[Path, Path]:
@@ -86,7 +93,7 @@ def crawl_details(limit: int | None = None, only_failed: bool = False, headless:
     latest = latest_log_by_doc()
     todo: list[tuple[Section, dict]] = []
     for section in SECTIONS.values():
-        rows = sorted(read_rows(section), key=lambda r: (r["list_date"], int(r["doc_no"] or 0)), reverse=True)
+        rows = sorted(read_rows(section), key=lambda r: (r["list_date"], _doc_no_sort_key(r["doc_no"])), reverse=True)
         if limit:
             rows = rows[:limit]
         for row in rows:
@@ -101,15 +108,34 @@ def crawl_details(limit: int | None = None, only_failed: bool = False, headless:
     print(f"待抓取 {len(todo)} 篇")
     if not todo:
         return
-    ok = fail = 0
-    with Browser(headless=headless) as b:
+    ok = fail = consecutive_fails = 0
+    b = Browser(headless=headless)
+    try:
         for i, (section, row) in enumerate(todo, 1):
             entry = fetch_one(b, section, row)
             append_log(entry)
             if entry["success"] == "True":
                 ok += 1
+                consecutive_fails = 0
             else:
                 fail += 1
+                consecutive_fails += 1
             print(f"[{i}/{len(todo)}] {section.name} {row['list_date']} {row['doc_no']} "
                   f"{'OK' if entry['success'] == 'True' else 'FAIL ' + entry['error']}", flush=True)
+            if consecutive_fails >= MAX_CONSECUTIVE_FAILS:
+                print(f"连续失败 {consecutive_fails} 篇，中止抓取，请检查网络或浏览器状态后重试。", flush=True)
+                break
+            if consecutive_fails == 2 and i < len(todo):
+                cooldown = random.uniform(10.0, 20.0)
+                print(f"  [!] 连续 2 篇抓取失败，等待 {cooldown:.1f}s 后重启浏览器会话...", flush=True)
+                b.close()
+                time.sleep(cooldown)
+                try:
+                    b = Browser(headless=headless)
+                except Exception as e:
+                    err_msg = str(e).splitlines()[0] if str(e) else type(e).__name__
+                    print(f"  [!] 重启浏览器失败（{err_msg}），中止抓取。", flush=True)
+                    break
+    finally:
+        b.close()
     print(f"完成：成功 {ok}，失败 {fail}")

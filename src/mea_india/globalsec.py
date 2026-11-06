@@ -44,6 +44,7 @@ def run_globalsecurity_check(headless: bool = True):
     print(f"没有例行记者会的周：{len(gaps)} 个，逐日探测 GlobalSecurity")
 
     found = []
+    errors = []
     with Browser(headless=headless) as b:
         b.open(GS_BASE + "/wmd/library/news/india/index.html")
         for monday in gaps:
@@ -60,10 +61,14 @@ def run_globalsecurity_check(headless: bool = True):
                         title = text.split("<title>", 1)[1].split("</title>", 1)[0].strip()
                     found.append({"week": monday.isoformat(), "gs_date": day.isoformat(), "url": url, "title": title})
                     print(f"  找到 {day}：{title}")
+                elif status != 404:
+                    errors.append({"week": monday.isoformat(), "gs_date": day.isoformat(), "url": url, "status": status})
+                    print(f"  ⚠ {day} 请求异常：HTTP {status} ({url})")
 
     result = {
         "gap_weeks": [m.isoformat() for m in gaps],
         "found": found,
+        "errors": errors,
     }
     GS_RESULT.write_text(json.dumps(result, ensure_ascii=False, indent=2), encoding="utf-8")
-    print(f"完成：{len(gaps)} 个空周中，GlobalSecurity 上找到 {len(found)} 篇 -> {GS_RESULT.name}")
+    print(f"完成：{len(gaps)} 个空周中，GlobalSecurity 上找到 {len(found)} 篇，请求异常 {len(errors)} 次 -> {GS_RESULT.name}")

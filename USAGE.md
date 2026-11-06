@@ -38,8 +38,8 @@ uv run playwright install chromium
 ```
 src/mea_india/
 ├── config.py     路径、栏目编号、时间范围、接口地址
-├── stealth.py    指纹隐匿补丁（STEALTH_INIT_SCRIPT）与生物力学鼠标/滚轮拟真操作
-├── browser.py    Playwright 封装：优先本机 Chrome、限速、429/503 退避重试、页面内同源请求、捕获接口原始响应
+├── stealth.py    浏览器属性修改与鼠标移动、滚轮滚动模拟
+├── browser.py    Playwright 封装：启动浏览器、限速、页面内同源请求、获取接口原始响应
 ├── lists.py      列表抓取与解析
 ├── details.py    详情抓取、抓取日志、断点续爬
 ├── parse.py      正文清洗、字段提取、去重

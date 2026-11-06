@@ -1,4 +1,4 @@
-"""Playwright 浏览器封装：单个浏览器会话、指纹隐匿、生物力学拟真交互、限速与接口响应捕获。"""
+"""Playwright 浏览器封装：单个浏览器会话、浏览器属性修改、鼠标与滚轮模拟、限速及接口响应获取。"""
 
 import os
 import random
@@ -17,17 +17,19 @@ from .config import BASE_URL, DELAY_RANGE
 from .stealth import STEALTH_INIT_SCRIPT, human_browse_page, human_micro_drift, human_reset_gaze
 
 
-def _default_user_agent() -> str:
-    """生成与当前操作系统平台一致的桌面 Chrome User-Agent，避免 navigator.platform 与 UA 冲突。"""
+def _build_user_agent(browser_version: str) -> str:
+    """使用实际启动浏览器的主版本号构造 User-Agent（Chrome/<major>.0.0.0），保持与 Sec-CH-UA 及 navigator.platform 一致。"""
     if sys.platform.startswith("win"):
         platform_part = "Windows NT 10.0; Win64; x64"
     elif sys.platform.startswith("linux"):
         platform_part = "X11; Linux x86_64"
     else:
         platform_part = "Macintosh; Intel Mac OS X 10_15_7"
+    raw_ver = browser_version.replace("HeadlessChrome/", "").replace("Chrome/", "").strip()
+    major = raw_ver.split(".")[0] if raw_ver and raw_ver.split(".")[0].isdigit() else "136"
     return (
         f"Mozilla/5.0 ({platform_part}) AppleWebKit/537.36 "
-        "(KHTML, like Gecko) Chrome/155.0.0.0 Safari/537.36"
+        f"(KHTML, like Gecko) Chrome/{major}.0.0.0 Safari/537.36"
     )
 
 
@@ -39,7 +41,6 @@ def _browser_args() -> list[str]:
     return args
 
 
-USER_AGENT = _default_user_agent()
 BROWSER_ARGS = _browser_args()
 
 _FETCH_JS = """
@@ -89,10 +90,12 @@ class Browser:
         try:
             self._pw = sync_playwright().start()
             self._browser = self._launch_browser(headless=headless)
+            user_agent = _build_user_agent(self._browser.version)
             self._context = self._browser.new_context(
-                user_agent=USER_AGENT,
+                user_agent=user_agent,
                 viewport={"width": 1400, "height": 1000},
                 locale="en-US",
+                extra_http_headers={"Accept-Language": "en-US,en;q=0.9"},
             )
             self._context.add_init_script(STEALTH_INIT_SCRIPT)
             self.page = self._context.new_page()
@@ -104,18 +107,38 @@ class Browser:
             raise
 
     def _launch_browser(self, headless: bool):
-        """优先启动本机真实 Google Chrome 以获得完整浏览器指纹，不可用时回退至 Playwright Chromium。"""
-        chrome_path = _default_chrome_path()
-        if chrome_path:
+        """优先启动本机 Google Chrome，不可用时打印原因并回退至 Playwright 内置 Chromium。"""
+        env_chrome = os.getenv("CHROME_PATH")
+        if env_chrome and not Path(env_chrome).exists():
+            print(f"  [!] 环境变量 CHROME_PATH 指定的路径不存在：{env_chrome}", flush=True)
+            chrome_path = _default_chrome_path()
+        else:
+            chrome_path = env_chrome or _default_chrome_path()
+
+        if chrome_path and Path(chrome_path).exists():
             try:
-                return self._pw.chromium.launch(
+                browser = self._pw.chromium.launch(
                     executable_path=chrome_path,
                     headless=headless,
                     args=BROWSER_ARGS,
                 )
-            except Exception:
-                pass
-        return self._pw.chromium.launch(headless=headless, args=BROWSER_ARGS)
+                print(f"  [*] 浏览器已启动：本机 Google Chrome ({browser.version}) - {chrome_path}", flush=True)
+                return browser
+            except Exception as e:
+                err_msg = str(e).splitlines()[0] if str(e) else type(e).__name__
+                print(f"  [!] 启动本机 Google Chrome 失败（{err_msg}），回退至 Playwright Chromium", flush=True)
+        else:
+            try:
+                browser = self._pw.chromium.launch(channel="chrome", headless=headless, args=BROWSER_ARGS)
+                print(f"  [*] 浏览器已启动：Google Chrome channel ({browser.version})", flush=True)
+                return browser
+            except Exception as e:
+                err_msg = str(e).splitlines()[0] if str(e) else type(e).__name__
+                print(f"  [!] 未找到可用 Google Chrome channel（{err_msg}），使用 Playwright Chromium", flush=True)
+
+        browser = self._pw.chromium.launch(headless=headless, args=BROWSER_ARGS)
+        print(f"  [*] 浏览器已启动：Playwright Chromium ({browser.version})", flush=True)
+        return browser
 
     def _on_response(self, response: Response):
         if (
@@ -126,16 +149,26 @@ class Browser:
             self._responses.append(response)
 
     def close(self):
-        try:
-            if self._context is not None:
-                self._context.close()
-        finally:
+        """幂等关闭浏览器上下文、浏览器实例与 Playwright 进程，忽略关闭期间的异常。"""
+        context, self._context = self._context, None
+        browser, self._browser = self._browser, None
+        pw, self._pw = self._pw, None
+
+        if context is not None:
             try:
-                if self._browser is not None:
-                    self._browser.close()
-            finally:
-                if self._pw is not None:
-                    self._pw.stop()
+                context.close()
+            except Exception:
+                pass
+        if browser is not None:
+            try:
+                browser.close()
+            except Exception:
+                pass
+        if pw is not None:
+            try:
+                pw.stop()
+            except Exception:
+                pass
 
     def __enter__(self):
         return self
@@ -148,7 +181,7 @@ class Browser:
         return self.page.content()
 
     def polite_wait(self):
-        """保证与上一次请求间隔 2—5 秒（随机）。"""
+        """保证与上一次请求间隔 DELAY_RANGE 秒（随机）。"""
         gap = random.uniform(*DELAY_RANGE)
         elapsed = time.monotonic() - self._last_request
         if elapsed < gap:
@@ -156,7 +189,7 @@ class Browser:
         self._last_request = time.monotonic()
 
     def open(self, path_or_url: str, wait_css: str | None = None) -> str:
-        """打开页面；wait_css 给定时等待该元素挂载到 DOM，并执行生物力学拟真浏览动作。"""
+        """打开页面；wait_css 给定时等待该元素挂载到 DOM，并执行鼠标移动与滚轮滚动操作。"""
         url = path_or_url if path_or_url.startswith("http") else BASE_URL + path_or_url
         self.polite_wait()
         self._responses.clear()

@@ -1,7 +1,7 @@
 [project]
 name = "mea-india"
 version = "0.1.0"
-description = "Add your description here"
+description = "印度外交部（MEA）记者会实录与答记者问抓取与解析工具"
 readme = "README.md"
 authors = [
     { name = "TerraRiver", email = "20231081107@ucass.edu.cn" }

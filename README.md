@@ -1,236 +1,252 @@
-# 印度外交部记者会实录与答记者问爬取任务说明
+# MEA Spokesperson Crawler
 
-## 一、任务背景与目标
+基于 Playwright 的印度外交部官网（`www.mea.gov.in`）文本抓取与解析工具。程序抓取 `Transcripts`（记者会实录）和 `Response to Media Queries`（答记者问）两个栏目在 `2020-01-01` 至 `2026-03-31` 期间发布的全部英文文本，保存原始 HTML 文件，并将解析后的结构化数据输出为 JSON 文件。
 
-请完整抓取印度外交部官网两个栏目在 2020 年 1 月 1 日至 2026 年 3 月 31 日期间发布的全部英文文本，约 700 篇，整理成结构化数据。数据将用于研究印度政府在中印边界问题上的官方表态，并与同一时间段的印度媒体报道语料对照分析。
+> 本工具仅用于学术研究的数据采集，运行时请控制请求频率，避免对目标网站造成负担。
 
-本任务只负责完整、原样地收集和整理数据，**不需要做任何内容筛选或判断**。哪些内容涉华、涉及边界，由后续分析统一处理。
+## 功能说明
 
-## 二、数据来源与抓取范围
+### 运行逻辑与功能结构图
 
-数据来源为印度外交部官网 www.mea.gov.in，抓取以下两个栏目在时间范围内的**全部**文本。
+```mermaid
+flowchart TD
+    BrowserInit["1. 启动本机 Chrome (未安装时回退至 Chromium)，设置 User-Agent 与初始化脚本"] --> ListStep["2. 执行 mea-india list：访问 Transcripts (ID=49) 与 Response to Media Queries (ID=69) 栏目页"]
+    ListStep --> FetchList["在页面内分页请求 FetchPublicationListingData 接口 (每页 100 条)，保存原始列表 HTML"]
+    FetchList --> SaveCSV["提取 doc_no、标题、日期、网址与标签，按 2020-01-01 至 2026-03-31 过滤去重后写入 *_list.csv"]
 
-| 栏目 | 网站路径 | 内容 | 预计篇数 |
+    SaveCSV --> ReadTodo["3. 执行 mea-india fetch：读取列表 CSV 并合并 SUPPLEMENTS 列表外补充篇目"]
+    ReadTodo --> CheckLog["对比 crawl_log.csv 与本地文件：跳过已成功且 .html / .fragment.html 均存在的篇目"]
+    CheckLog --> DetailLoop["4. 每次请求前随机等待 2-5 秒，访问详情页并监听 FetchPublicationDetailData 接口"]
+
+    DetailLoop --> FragCheck{"是否捕获到详情接口响应?"}
+    FragCheck -- "否" --> FallbackFetch["在页面内主动调用 fetch() 请求详情接口 (遇 HTTP 429/503 等待 15-25 秒重试)"]
+    FragCheck -- "是" --> BrowseSim["5. 使用 mouse.wheel 分步向下滚动页面，按贝塞尔曲线移动鼠标并按字数停留等待"]
+    FallbackFetch --> BrowseSim
+
+    BrowseSim --> ValidateTitle{"片段中是否包含 h2.titleText 标题?"}
+    ValidateTitle -- "是" --> SaveRaw["6. 保存整页 .html 与片段 .fragment.html，将成功记录追加写入 crawl_log.csv"]
+    ValidateTitle -- "否 (或请求异常)" --> LogFail["将失败原因追加写入 crawl_log.csv"]
+
+    LogFail --> FailCount{"检查连续失败次数"}
+    FailCount -- "未达阈值" --> NextCheck
+    FailCount -- "连续失败 2 篇" --> RestartBrowser["等待 10-20 秒后关闭并重启浏览器会话"] --> DetailLoop
+    FailCount -- "连续失败 5 篇" --> AbortFetch["中止本次抓取，保留已有日志"]
+
+    SaveRaw --> NextCheck{"是否还有待抓取篇目?"}
+    NextCheck -- "是" --> DetailLoop
+    NextCheck -- "否" --> ParseLocal["7. 执行 mea-india parse：读取本地 .fragment.html，提取标题、日期、类型、发言人、标签与正文"]
+
+    ParseLocal --> CleanText["还原段落换行与 HTML 实体，去除末尾其他语言版本链接，按网址与正文去重后写入 mea_documents.json"]
+    CleanText --> GlobalSec["8. 执行 mea-india globalsec (可选)：对无例行记者会的周逐日请求 globalsecurity.org，写入 globalsecurity_check.json"]
+    GlobalSec --> CheckReport["9. 执行 mea-india check：汇总总数核对、按月与类型统计、空值与去重检查、固定种子抽样 (spot_check.json)，生成 check_report.md"]
+```
+
+### 按运行顺序的功能说明
+
+1. **启动本地浏览器与修改浏览器属性（`src/mea_india/browser.py`、`src/mea_india/stealth.py`）**
+   - 默认优先查找并启动本机安装的 Google Chrome，未安装或启动失败时自动回退至 Playwright 内置 Chromium，并在终端打印实际启动的浏览器类型与版本号。
+   - 启动时添加 `--disable-blink-features=AutomationControlled` 参数使 `navigator.webdriver` 保持为 `false`；提取实际运行浏览器的主版本号构造 `User-Agent`（`Chrome/<major>.0.0.0`），使其与 `Sec-CH-UA` 请求头一致。
+   - 在浏览器上下文中设置 `Accept-Language: en-US,en;q=0.9`，并通过初始化脚本固定 `navigator.languages` 返回数组及处理 `Notification` 权限查询。
+2. **分页抓取两个栏目的文章列表（`src/mea_india/lists.py`）**
+   - 依次访问 `Transcripts`（`publicationId=49`）和 `Response to Media Queries`（`publicationId=69`）栏目页面建立同源会话。
+   - 在页面内调用 `fetch()` 分页请求 `/FrontEnd/FetchPublicationListingData` 接口（每页 100 条，请求日期范围放宽为 `24/12/2019 - 07/04/2026`），将接口返回的每页原始 HTML 保存在 `mea_data/lists/raw/`。
+   - 从列表中提取文章编号（`doc_no`）、标题、发布日期、详情页网址和标签，在本地按 `2020-01-01` 至 `2026-03-31` 过滤并按 `doc_no` 去重后，写入 `mea_data/lists/transcripts_list.csv` 和 `mea_data/lists/media_responses_list.csv`。
+3. **读取本地断点与合并列表外补充篇目（`src/mea_india/details.py`）**
+   - 读取两个栏目的列表 CSV，并合并 `SUPPLEMENTS` 中登记的列表外篇目（网站列表未收录但详情页存在的文章）。
+   - 读取 `mea_data/crawl_log.csv` 中每篇文章最后一次抓取记录：若状态为成功且本地整页 `.html` 与片段 `.fragment.html` 文件均存在，则直接跳过；若传入 `--only-failed` 参数，则仅重新抓取日志中失败过的篇目。
+4. **逐篇抓取详情页、模拟页面浏览与失败恢复（`src/mea_india/details.py`、`src/mea_india/stealth.py`）**
+   - 单线程运行，每次请求前随机等待 2—5 秒。访问详情页网址并通过 `page.on("response", ...)` 监听后台 `/FrontEnd/FetchPublicationDetailData` 接口返回的 HTML 片段；若未捕获到该响应，则在页面内主动调用 `fetch()` 请求详情接口（当返回 HTTP 429 或 503 时等待 15—25 秒后重试一次）。
+   - 页面加载后，通过 `page.mouse.wheel()` 分多次向下滚动页面（滚动间隙随机移动鼠标或小幅向上回滚），再将鼠标从当前停留坐标按三阶贝塞尔曲线分步移动至视口内的正文区域，并根据正文字数停留 0.5—1.8 秒。
+   - 检查详情片段是否包含非空的 `h2.titleText` 标题：检查通过后将浏览器渲染后的整页 HTML（`.html`）与接口返回的详情片段（`.fragment.html`）写入 `mea_data/raw_html/`，并将抓取时间、状态与文件路径实时追加写入 `crawl_log.csv`。
+   - 抓取过程中若连续 2 篇失败，程序等待 10—20 秒后关闭并重新启动浏览器会话；若连续 5 篇失败，则中止抓取并保留已有日志。
+5. **离线解析 HTML 片段与正文清洗（`src/mea_india/parse.py`）**
+   - 直接读取本地保存的 `.fragment.html` 文件（修改解析规则后无需重新访问网站），提取标题、发布日期、标题中的记者会日期、发言人姓名、标签和正文，并根据栏目与标题关键词划分文章类型（`weekly_briefing`、`special_briefing`、`other_briefing`、`media_response`）。
+   - 遍历正文 DOM 节点：将块级标签与 `<br>` 转换为换行符，将不间断空格转换为普通空格并还原 HTML 实体字符，去除正文末尾指向其他语言版本 PDF 的链接（如 `Click here for Urdu version`），合并多余空行。
+   - 按网址与正文内容检查去重后，按 `publication_date` 升序写入 `mea_data/mea_documents.json`。
+6. **外部来源交叉核对与生成质量检查报告（`src/mea_india/globalsec.py`、`src/mea_india/check.py`）**
+   - `globalsec`：扫描已解析数据中没有例行记者会（`weekly_briefing`）的周，按 `globalsecurity.org` 的转载网址规律逐日发送请求，记录状态码（`200` 存在转载、`404` 无此页或其他异常状态码）并保存至 `mea_data/globalsecurity_check.json`，用于排查官网列表漏收的篇目。
+   - `check`：读取本地文件生成 `mea_data/check_report.md`，包含列表与解析总数核对、GlobalSecurity 交叉核对结果、2020-01 至 2026-03 按月统计、文章类型统计、空值检查、去重结果、非拉丁字符检查、按固定随机种子抽取的 10 篇人工核对表（结果保存在 `mea_data/spot_check.json`）以及失败与解析警告清单。
+
+## 环境要求
+
+- macOS / Linux / Windows
+- Python 3.12 或更高版本（见 `.python-version`）
+- [uv](https://docs.astral.sh/uv/)
+- 本机已安装 Google Chrome（或使用 Playwright 内置 Chromium）
+
+## 安装与配置
+
+```bash
+git clone git@github.com:TerraRiver/MEA_Spokesperson_Crawler.git
+cd MEA_Spokesperson_Crawler
+uv sync
+```
+
+如果本机未安装 Google Chrome，可安装 Playwright 内置 Chromium：
+
+```bash
+uv run playwright install chromium
+```
+
+## 运行与使用
+
+所有命令默认以无头（Headless）模式运行浏览器。如需显示浏览器窗口，可添加 `--headed` 参数（例如 `uv run mea-india fetch --limit 2 --headed`）。
+
+| 步骤 | 命令 | 输出文件 | 说明 |
 | --- | --- | --- | --- |
-| Transcripts（记者会实录） | Media → Media Briefings → Transcripts | 外交部发言人例行记者会、线上记者会、专题吹风会的文字实录，问答格式 | 约 500 篇 |
-| Response to Media Queries（答记者问） | Media → Media Releases → Response to Media Queries | 发言人针对具体事件发布的书面回应，篇幅短 | 约 200 篇 |
+| 1. 抓列表 | `uv run mea-india list` | `mea_data/lists/*_list.csv`<br>`mea_data/lists/raw/*.html` | 分页请求两个栏目的列表接口并按时间范围筛选 |
+| 2. 抓详情 | `uv run mea-india fetch` | `mea_data/raw_html/`<br>`mea_data/crawl_log.csv` | 逐篇抓取详情页，自动跳过已成功且文件存在的篇目 |
+| 3. 解析数据 | `uv run mea-india parse` | `mea_data/mea_documents.json` | 离线解析本地 `.fragment.html` 并去重输出 JSON |
+| 4. 外部核对（可选） | `uv run mea-india globalsec` | `mea_data/globalsecurity_check.json` | 对无例行记者会的周逐日请求 GlobalSecurity 核对 |
+| 5. 质量检查 | `uv run mea-india check` | `mea_data/check_report.md` | 汇总各项统计与核对结果生成检查报告 |
 
-抓取范围的几条规则：
+`fetch` 子命令支持的可选参数：
+- `uv run mea-india fetch --limit 10`：每个栏目仅抓取发布日期最新的 10 篇（用于小批量测试）。
+- `uv run mea-india fetch --only-failed`：仅重新抓取 `crawl_log.csv` 中最后一次状态为失败的篇目。
 
-- **时间**：发布日期在 2020-01-01 至 2026-03-31 之间，两端都包含。"发布日期"指网站页面日期（列表页和详情页 `.date` 显示的日期），与网站自身的日期筛选口径一致；标题括号中的记者会召开日期另存为 `briefing_date`，不用于判断范围。
-- **不按标签筛选**：网站上的 Tags 筛选（包括 China 标签）一律不用，两个栏目都全量抓取。
-- **不按标题筛选**：Transcripts 栏目里有多种标题，例如 "Transcript of Weekly Media Briefing…"、"Transcript of Virtual Weekly Media Briefing…"（2020—2021 年疫情期间）、"Special Briefing…"，全部都要。
-- **只要英文版**：部分文件有印地语或其他语言版本，只保留英文版。列表和详情一律以英文（`PLngId=1` / `languageId=1`）请求；**不统计**哪些篇目另有其他语言版本。
+### 输出 JSON 结构说明（`mea_documents.json`）
 
-## 三、技术要求
+`mea_documents.json` 为 UTF-8 编码的 JSON 数组，按 `publication_date` 升序排列：
 
-外交部网站可能有反爬虫机制。本项目技术栈为 **Python + Playwright**（驱动真实 Chromium 浏览器），按以下步骤进行。
-
-1. **先摸清网站结构**。网站近期改版，列表内容可能由后台接口动态加载。用浏览器打开列表页，按 F12 打开开发者工具的 Network（网络）标签，翻到第 2 页，找到返回列表数据的请求，记下它的网址和参数。直接请求这个接口抓列表，比解析整页网页简单。
-2. **先抓列表，再抓详情页**。先把两个栏目的完整列表（标题、日期、网址、标签）抓下来存成文件，再逐篇抓取详情页。
-3. **先存原始 HTML，再解析**。每篇详情页的 HTML 原样保存到本地，以后修改解析规则时不需要重新爬取。
-4. **应对反爬**：
-    - 使用 Playwright 驱动真实浏览器（优先调用本机 Google Chrome，回退至 Playwright Chromium），同一浏览器会话保持 cookie；
-    - 注入 `STEALTH_INIT_SCRIPT` 抹除 `navigator.webdriver` 等自动化指纹，并在页面加载及请求期间执行生物力学拟真行为（三阶贝塞尔曲线鼠标移动、Ease-Out 减速、生理微颤抖与过冲、分拨次变速滚轮浏览）；
-    - 单线程，每次请求间隔 2—5 秒（随机），不要并发；遇 HTTP 429/503 自动冷却退避并重试；
-    - 仍然被拦截时暂停并记录，再商量处理方式。
-5. **记录日志，支持断点续爬**。每篇记录抓取时间和是否成功，失败的单独列出后补爬，不要从头重来。
-
-### 网站结构（2026-10-12 浏览器探查结果）
-
-网站已改版，列表和正文都由后台接口以 **HTML 片段**（不是 JSON）动态加载：
-
-| 用途 | 接口 | 说明 |
-| --- | --- | --- |
-| 列表 | `/FrontEnd/FetchPublicationListingData?publicationId={ID}&KeywordName=&SortBy=new&page={N}&PageSize=100&DateRange={起} - {止}&IsInternalMEA=false&PLngId=1` | 每条为 `.pressRelesastBox`：日期 `.date`、标题与网址 `.pressTitle a`、标签 `.tags a`；总数见 `.paginationBox` 中 "Displaying Item x To y of N" |
-| 详情 | `/FrontEnd/FetchPublicationDetailData?pkid={网站编号}&languageId=1` | 日期 `.date`、标题 `h2.titleText`、正文 `.description`、标签 `.tags a` |
-
-- 栏目编号：Transcripts 为 `publicationId=49`（注意页面网址 `media-briefings?51/Transcripts` 中的 51 不是接口编号）；Response to Media Queries 为 `publicationId=69`（页面 `response-to-queries?69/Media_Queries`）。
-- `DateRange` 只接受 `dd/mm/yyyy - dd/mm/yyyy`，其他格式会被静默忽略并返回全部年份。由于无法验证接口对边界日期是否包含，列表抓取时把范围前后各放宽约一周，再在本地按页面日期严格筛选 2020-01-01 至 2026-03-31（两端包含）。
-- 详情页网址格式：`https://www.mea.gov.in/media-briefings?dtl/{编号}/{标题slug}`、`https://www.mea.gov.in/response-to-queries?dtl/{编号}/{标题slug}`。
-- 探查时范围内条数：Transcripts 458 篇（全站 3217），Response to Media Queries 222 篇（全站 392），网址无重复。
-- 2020—2021 年老页面段落多以 `<br>` 分隔而非 `<p>`。
-- **列表外篇目**：网站上存在详情页可以访问、但不出现在任何列表（栏目列表和"全部媒体"列表）中的文章。已确认 2 篇：2025-10-16 例行记者会（编号 40219）和 2025-10-30 例行记者会（编号 40245），是经 GlobalSecurity 交叉核对发现的；两篇标签均为空，推测未设标签的文章不进列表。只按列表抓取会漏掉这类文章。
-  处理方式：列表外篇目登记在代码 `src/mea_india/lists.py` 的 `SUPPLEMENTS` 中（编号、标题、日期、网址、发现经过），按编号直接抓取详情，与列表篇目一样保存原始 HTML、写抓取日志、解析入库，记录中 `source` 为 `supplement`；栏目列表 CSV 仍只记录网站列表原样内容；质量检查报告"总数核对"一节单独列出这些篇目。
-
-**备用核对来源**：GlobalSecurity.org 转载了外交部的例行记者会实录，网址规律为 `globalsecurity.org/wmd/library/news/india/年份/india-年月日-india-meab01.htm`，例如 https://www.globalsecurity.org/wmd/library/news/india/2024/india-240912-india-meab01.htm 。它只用于核对篇数或补缺，不作为正式数据来源。注意网址里的日期是转载日期，可能比记者会晚一天，日期一律以正文标题为准。
-
-## 四、交付物与目录结构
-
-请把以下内容打包成一个文件夹交付：
-
-1. **原始 HTML**：每篇保存两个文件：
-    - 整页：Playwright 渲染完成（`.description` 出现）后的完整页面源码，文件名 `类型_日期_网站编号.html`，例如 `transcript_2024-09-12_38297.html`、`response_2022-03-23_34982.html`；
-    - 正文片段：详情接口返回的 HTML 片段原样保存，文件名 `类型_日期_网站编号.fragment.html`，解析以此为准。
-
-    日期为页面日期（`publication_date`）。网站编号取详情页网址中的数字编号；没有编号时用标题前几个英文单词代替。
-2. **列表文件**：两个栏目各一份 CSV，记录列表页上的标题、日期、网址、标签（只含网站列表中的篇目，列表外补充篇目不写入）。
-3. **结构化数据** `mea_documents.json`：两个栏目合并为一个文件，字段见第五节。
-4. **抓取日志** `crawl_log.csv`：每篇一行，记录网址、抓取时间、是否成功、失败原因。
-5. **质量检查报告** `check_report.md`：内容见第七节。
-6. **代码和说明**：爬虫和解析脚本，以及一份 README，说明运行环境、依赖包和运行步骤。
-
-```
-mea_data/
-├── raw_html/
-│   ├── transcripts/          # *.html 整页 + *.fragment.html 正文片段
-│   └── media_responses/
-├── lists/
-│   ├── transcripts_list.csv
-│   └── media_responses_list.csv
-├── mea_documents.json
-├── crawl_log.csv
-├── check_report.md
-├── code/
-└── README.md
+```json
+[
+  {
+    "id": "mea_transcripts_38297",
+    "section": "transcripts",
+    "doc_type": "weekly_briefing",
+    "title": "Transcript of Weekly Media Briefing by the Official Spokesperson (September 12, 2024)",
+    "publication_date": "2024-09-12",
+    "briefing_date": "2024-09-12",
+    "url": "https://www.mea.gov.in/media-briefings?dtl/38297/Transcript_of_Weekly_Media_Briefing_by_the_Official_Spokesperson_September_12_2024",
+    "tags": [
+      "Official Spokesperson",
+      "Media Briefing"
+    ],
+    "spokesperson": "Randhir Jaiswal",
+    "content": "Shri Randhir Jaiswal, Official Spokesperson: Good afternoon friends...",
+    "raw_file": "raw_html/transcripts/transcript_2024-09-12_38297.html",
+    "raw_fragment_file": "raw_html/transcripts/transcript_2024-09-12_38297.fragment.html",
+    "crawl_time": "2026-10-12 16:05:12",
+    "source": "site_list"
+  }
+]
 ```
 
-## 五、数据字段规范
-
-`mea_documents.json` 为 UTF-8 编码的 JSON 数组，每篇文本一条记录，按日期升序排列。保存时不要转义中文和特殊字符（Python 中设置 `ensure_ascii=False`）。
+字段含义：
 
 | 字段 | 类型 | 说明 |
 | --- | --- | --- |
-| id | 字符串 | 唯一编号，格式为 `mea_{section}_{网站编号}`，如 `mea_transcripts_38297`、`mea_media_responses_34982` |
-| section | 字符串 | 所属栏目：`transcripts` 或 `media_responses` |
-| doc_type | 字符串 | 文本类型，取值规则见下表 |
-| title | 字符串 | 标题，原样保留 |
-| publication_date | 字符串 | 发布日期，格式 `YYYY-MM-DD`，取页面日期（详情页 `.date`，与列表日期一致） |
-| briefing_date | 字符串或 null | 仅 Transcripts：标题中最后一个可识别的日期（多在末尾括号中，如 "(January 30, 2020)"、"(11th December 2020)"、"(06-June-2022)"，也可能不带括号，如 "…on 14 August 2020"），格式 `YYYY-MM-DD`；常比 `publication_date` 早一天；标题无日期时填 null。Response to Media Queries 标题中的日期是事件日期，一律填 null |
-| url | 字符串 | 详情页网址 |
-| tags | 字符串列表 | 网站标签，没有则为空列表 |
-| spokesperson | 字符串或 null | 发言人姓名（不含 Shri/Sh./Mr. 等称谓，拼写原样保留），从正文中第一处明确标明发言人身份的表述提取："Shri ……, Official Spokesperson"、"Official Spokesperson Shri ……"、"Official Spokesperson, ……"、"MEA Spokesperson ……"（不区分大小写）；只写 "Official Spokesperson said" 而无姓名、或正文未出现发言人身份的，填 null |
-| content | 字符串 | 清洗后的正文，规则见第六节 |
-| raw_file | 字符串 | 对应整页原始 HTML 文件的相对路径 |
-| raw_fragment_file | 字符串 | 对应正文片段 HTML 文件的相对路径 |
-| crawl_time | 字符串 | 抓取时间，格式 `YYYY-MM-DD HH:MM:SS` |
-| source | 字符串 | 篇目来源：`site_list`（网站栏目列表中的篇目）或 `supplement`（列表外补充篇目，见第三节"列表外篇目"） |
+| `id` | 字符串 | 唯一编号，格式为 `mea_{section}_{网站编号}`，如 `mea_transcripts_38297`、`mea_media_responses_34982` |
+| `section` | 字符串 | 所属栏目：`transcripts` 或 `media_responses` |
+| `doc_type` | 字符串 | 文本类型，取值规则见下表 |
+| `title` | 字符串 | 详情页标题，原样保留 |
+| `publication_date` | 字符串 | 页面显示的发布日期（`.date`），格式 `YYYY-MM-DD` |
+| `briefing_date` | 字符串或 `null` | 仅 `transcripts` 栏目：从标题中提取的最后一个日期（如 `(January 30, 2020)`、`(11th December 2020)`、`…on 14 August 2020`），格式 `YYYY-MM-DD`；标题不含日期或属于 `media_responses` 栏目时为 `null` |
+| `url` | 字符串 | 详情页完整网址 |
+| `tags` | 字符串列表 | 页面上的标签列表，无标签时为空列表 `[]` |
+| `spokesperson` | 字符串或 `null` | 发言人姓名（去除 `Shri`/`Sh.`/`Mr.`/`Dr.` 称谓），从正文中第一处标明发言人身份的表述（如 `Shri ..., Official Spokesperson`、`Official Spokesperson Shri ...`、`Official Spokesperson, ...`、`MEA Spokesperson ...`）提取；正文未出现姓名时为 `null` |
+| `content` | 字符串 | 清洗后的正文文本 |
+| `raw_file` | 字符串 | 整页原始 HTML 文件相对于 `mea_data/` 的路径 |
+| `raw_fragment_file` | 字符串 | 详情接口 HTML 片段文件相对于 `mea_data/` 的路径 |
+| `crawl_time` | 字符串 | 抓取时间，格式 `YYYY-MM-DD HH:MM:SS` |
+| `source` | 字符串 | 篇目来源：`site_list`（网站栏目列表中的篇目）或 `supplement`（列表外补充篇目） |
 
-`doc_type` 按标题判断，不区分大小写，按表中顺序依次匹配，命中即停：
+`doc_type` 取值与判断规则（不区分大小写，按顺序匹配）：
 
 | 取值 | 判断规则 |
 | --- | --- |
-| weekly_briefing | Transcripts 栏目，标题含 "Weekly Media Briefing"（包括 "Virtual Weekly Media Briefing"、"Bi-weekly Media Briefing"） |
-| special_briefing | Transcripts 栏目，标题匹配正则 `special.*briefing`，即 "Special" 在前、"Briefing" 在后，中间可有其他词，如 "Special Briefing"、"Special Media Briefing"、"Special media briefing"、"Special Virtual Briefing" |
-| other_briefing | Transcripts 栏目中不符合以上两条的 |
-| media_response | Response to Media Queries 栏目的全部文本 |
+| `weekly_briefing` | `transcripts` 栏目中标题包含 `Weekly Media Briefing`（含 `Virtual Weekly Media Briefing`、`Bi-weekly Media Briefing`） |
+| `special_briefing` | `transcripts` 栏目中标题匹配正则 `special.*briefing`（如 `Special Briefing`、`Special Media Briefing`、`Special Virtual Briefing`） |
+| `other_briefing` | `transcripts` 栏目中不符合以上两条的其他文本 |
+| `media_response` | `media_responses` 栏目的全部文本 |
 
-## 六、文本清洗规则
+### 正文清洗规则
 
-清洗只去掉网页框架，**正文内容一个字都不改**。
+- **去除的内容**：
+  - 网页导航栏、菜单、页眉页脚、侧边栏、分享按钮等非正文元素；
+  - HTML 标签与脚本，并将 HTML 实体（如 `&amp;`、`&nbsp;`）还原为普通字符；
+  - 行首行尾多余空白，并将连续空行合并为单个换行；
+  - 正文末尾指向其他语言版本 PDF 的链接（文字格式为 `Click here for Xxx version` 且 `href` 以 `.pdf` 结尾的链接及其后的 PDF 图标；紧邻其前的落款如 `New Delhi` 和日期行予以保留）。
+- **保留的内容**：
+  - 段落分隔（块级标签与 `<br>` 转换为换行符 `\n`）；
+  - 说话人标识（如 `Shri Randhir Jaiswal, Official Spokesperson:`、`Sidhant:`）；
+  - 正文中以拉丁字母拼写的印地语问答及方括号内的 `Approximate Translation` 英文翻译；
+  - 原文中的拼写、标点及字符缺失（如部分 2020 年实录源码中缺失撇号的 `Ill`、`weve`），不做字符替换或修正。
 
-要去掉的：
+## 印度外交部网站结构与抓取规则说明（记录于 2026-10-12）
 
-- 导航栏、菜单、页眉页脚、侧边栏、分享按钮、"相关链接"等网页元素；
-- HTML 标签和脚本，HTML 实体转换为正常字符（如 `&amp;` 转为 `&`）；
-- 行首行尾多余的空格，以及连续的空行（合并为一个）；
-- 正文末尾指向其他语言版本 PDF 的链接：链接文字为 "Click here for Xxx version"（如 "Click here for Assamese version"，常见于 2025 年以后的 Response to Media Queries，通常为 11 种印度地方语言）且指向 `.pdf` 文件的链接，连同其后的 PDF 图标一并去掉。紧邻其前的落款（如 "New Delhi" 和日期行）属于正文，保留。
+### 1. 栏目与抓取范围
 
-要保留的：
+| 栏目名称 | 网站导航路径 | 页面路径 | 接口 `publicationId` | 内容说明 |
+| --- | --- | --- | --- | --- |
+| Transcripts（记者会实录） | Media → Media Briefings → Transcripts | `/media-briefings?51/Transcripts` | `49` | 外交部发言人例行记者会、线上记者会、专题吹风会文字实录 |
+| Response to Media Queries（答记者问） | Media → Media Releases → Response to Media Queries | `/response-to-queries?69/Media_Queries` | `69` | 发言人针对具体事件发布的书面回应 |
 
-- **段落分隔**：段落之间用一个换行符 `\n` 分隔，不要把全文拼成一段；
-- **说话人标识**：如 "Shri Randhir Jaiswal, Official Spokesperson:"、"Sidhant:"，后续要靠它切分问答；
-- **印地语内容和翻译**：实录中有拉丁字母拼写的印地语问答，后面附有方括号标注的 "Approximate Translation" 英文意译，两者都原样保留，不要删除或自行翻译；
-- 原文中的拼写错误、口语化表达和不完整句子，一律不改；
-- 原文本身的字符缺失也不修补。例如 2020 年部分实录网站源码中撇号缺失（"I'll" 写作 "Ill"、"we've" 写作 "weve"），原样保留。
+抓取筛选规则：
+- **时间范围**：按页面发布日期（`.date`）筛选 `2020-01-01` 至 `2026-03-31`（两端包含）。
+- **全量抓取**：不使用网站上的标签（Tags）或标题筛选，两个栏目在时间范围内的全部篇目均抓取。
+- **语言参数**：列表和详情接口统一传入英文参数（`PLngId=1` / `languageId=1`）。
 
-段落切分：`.description` 内的 `<p>`、`<div>` 等块级元素边界和 `<br>` 均视为换行；只做 HTML 实体解码（含 `&nbsp;` 转为空格）、行首行尾空白去除和空行合并，不做其他字符替换（如不统一引号、不改 Unicode 字符）。
+### 2. 后台接口格式
 
-如果某篇详情页没有正文、只提供 PDF 附件，请下载 PDF 并在 `content` 中填入 PDF 提取的文字，同时在质量检查报告中列出这些篇目。
+网站列表和详情正文均由后台接口返回 HTML 片段动态加载：
 
-## 七、质量检查要求
-
-爬取完成后，请做以下检查，并把结果写进 `check_report.md`：
-
-- [x] **总数核对**：两个栏目各抓到多少篇，与列表中落在时间范围内的条数是否一致（网站显示的总数通常包含全部年份，不直接用于核对）；例行记者会另用 GlobalSecurity.org 交叉核对（该站无可用目录页，做法是：对数据中没有 `weekly_briefing` 的周，逐日探测其转载网址，含次周周一；探到的篇目回外交部网站确认是否漏抓）。不一致时列出缺失或多出的篇目。
-- [x] **按月统计**：按栏目和月份统计篇数，做成一张表。例行记者会大约每周一次，某个月份为 0 篇或明显偏少时，回到网站确认是确实没有发布，还是漏抓了。
-- [x] **类型统计**：按 `doc_type` 统计篇数，并列出所有 `other_briefing` 的标题，方便确认分类。
-- [x] **空值检查**：列出 `content` 为空或少于 200 个字符、`spokesperson` 为 null 的篇目。
-- [x] **去重**：检查是否有网址或正文完全相同的重复记录，有则只保留一条，并在报告中说明。
-- [x] **语言检查**：确认没有非英文版本混入（全部以 `languageId=1` 抓取；检查标题和正文中不含天城文字符，拉丁字母拼写的印地语问答属正常内容）。
-- [x] **人工抽查**：随机抽 10 篇，逐篇和网站原页面对照，确认标题、日期和正文完整无误，在报告中列出抽查的篇目和结果。
-- [x] **失败清单**：日志中最终仍然失败的篇目及原因。
-
-## 八、可选扩展任务：切分发言轮次
-
-这一部分不是必做项，开始前请先确认。
-
-任务是把记者会实录（`weekly_briefing`、`special_briefing`、`other_briefing`）按说话人切分成发言轮次，输出 `mea_turns.json`。之所以切成"轮次"而不是直接配成"问答对"，是因为发言人经常把几位记者的问题合并起来一起回答，自动配对容易出错，配对留到后续分析时处理。
-
-| 字段 | 说明 |
-| --- | --- |
-| turn_id | 编号，格式为 `文档id_序号`，如 `mea_transcripts_38297_015` |
-| doc_id | 所属文档的 id |
-| publication_date | 日期 |
-| order | 在该篇实录中的顺序，从 1 开始 |
-| speaker | 说话人原文标识，如 "Shri Randhir Jaiswal, Official Spokesperson" |
-| speaker_role | `spokesperson`（发言人）、`official`（其他官员，如专题吹风会上的外交秘书）、`journalist`（记者）、`moderator`（主持人或代读问题的官员）、`unknown` |
-| outlet | 记者自报的所属媒体，如 WION、PTI、ANI，识别不出填 null |
-| text | 这一轮的发言内容，原样保留 |
-
-切分时要注意两种特殊情况：
-
-- 2020—2021 年的线上记者会，问题由外交部官员代读，格式类似 "Gautam Lahiri is asking, …"。这类轮次的 `speaker_role` 标为 `moderator`，提问记者的姓名尽量识别出来，记在 `speaker` 中。
-- 记者常在发言开头自报姓名和媒体，例如 "Sidhant from WION"，`outlet` 从这里提取。
-
-## 九、时间安排与沟通
-
-建议分三步交付，每一步确认后再进行下一步，避免返工：
-
-1. **样例交付**：两个栏目各抓时间范围内（截至 2026-03-31）最新的 10 篇，按本说明的格式整理后先发给我确认。
-2. **全量交付**：样例确认无误后全量抓取，交付全部数据、日志和质量检查报告。
-3. **可选任务**：如需要，再确认是否进行发言轮次切分。
-
-其他事项：
-
-- 遇到本说明没有覆盖的情况，例如网站结构和描述不符、某类页面格式特殊，请先记录下来问我，不要自行决定处理方式。
-- 数据仅用于学术研究，抓取时请控制频率，不要对网站造成负担。
-- 截止日期：待定。
-
-## 十、施工进度与记录
-
-项目名：MEA_Spokesperson_Crawler（代码仓库 `git@github.com:TerraRiver/MEA_Spokesperson_Crawler.git`；运行说明见 `USAGE.md`）。
-
-### 进度（截至 2026-11-06）
-
-| 步骤 | 状态 | 结果 |
+| 用途 | 接口路径与参数 | 返回结构说明 |
 | --- | --- | --- |
-| 网站结构探查 | 完成 | 见第三节"网站结构" |
-| 样例交付 | 完成 | 两个栏目各最新 10 篇，已确认 |
-| 全量抓取 | 完成 | 列表篇目 680 / 680 成功，0 失败（Transcripts 458、Response to Media Queries 222），用时约 40 分钟；原始 HTML 约 339MB |
-| 列表外篇目补抓 | 完成 | 2 篇例行记者会（40219、40245）已补入，`source` 为 `supplement` |
-| 解析 | 完成 | 共 682 篇：weekly_briefing 188、special_briefing 243、other_briefing 29、media_response 222；无空正文、无重复、无仅 PDF 附件的篇目 |
-| 人工抽查 | 完成 | 随机 10 篇在浏览器中与原页面逐词比对，全部通过 |
-| GlobalSecurity 交叉核对 | 完成 | 145 个无例行记者会的周中探到 102 篇转载：101 篇已收录（含补入的 2 篇列表外篇目）；1 篇报告中标为"需人工确认"，经核对是标题措辞不同的同一篇（2024-09-02 文莱、新加坡吹风会，对应 `mea_transcripts_38247`） |
-| 质量检查报告 | 完成 | `mea_data/check_report.md` |
-| 浏览器驱动迁移与反爬强化 | 完成 | 2026-11-06 由 Selenium 迁移至 Playwright（`playwright.sync_api`），整合 `stealth.py` 指纹隐匿补丁与生物力学鼠标/滚轮拟真交互，支持优先调用本机 Chrome、捕获页面 `xhr`/`fetch` 响应、429/503 自动退避重试，并区分页面导航超时与元素等待超时（`SelectorTimeoutError`） |
-| 列表外篇目系统排查 | **待定** | 见"待确认事项" |
-| 发言轮次切分（可选） | 未开始 | 需先确认 |
+| 列表接口 | `/FrontEnd/FetchPublicationListingData?publicationId={ID}&KeywordName=&SortBy=new&page={N}&PageSize=100&DateRange={起} - {止}&IsInternalMEA=false&PLngId=1` | 每条记录位于 `.pressRelesastBox`：日期为 `.date`，标题与链接为 `.pressTitle a`，标签为 `.tags a`；总条数位于 `.paginationBox` 的 `Displaying Item x To y of N` |
+| 详情接口 | `/FrontEnd/FetchPublicationDetailData?pkid={网站编号}&languageId=1` | 包含日期 `.date`、标题 `h2.titleText`、正文 `.description` 和标签 `.tags a` |
 
-### 已确认的决定
+- `DateRange` 参数仅接受 `dd/mm/yyyy - dd/mm/yyyy` 格式。抓取列表时将请求范围前后各放宽约一周（`24/12/2019 - 07/04/2026`），拿到数据后再在本地按 `2020-01-01` 至 `2026-03-31` 过滤。
+- 详情页网址格式为 `https://www.mea.gov.in/media-briefings?dtl/{编号}/{标题slug}` 和 `https://www.mea.gov.in/response-to-queries?dtl/{编号}/{标题slug}`。
 
-| 事项 | 决定 |
-| --- | --- |
-| 技术栈 | Python + Playwright（2026-11-06 由 Selenium 迁移并整合生物力学反爬） |
-| `id` 格式 | `mea_{section}_{网站编号}` |
-| 总数核对口径 | 列表在时间范围内的条数，例行记者会另用 GlobalSecurity 核对 |
-| 样例 | 两个栏目各取时间范围内最新 10 篇 |
-| `publication_date` | 页面日期；标题中的记者会日期另存 `briefing_date` |
-| `doc_type` | special_briefing 放宽为 `special.*briefing` |
-| 多语言版本 | 不统计；正文末尾 "Click here for Xxx version" 的其他语言 PDF 链接从 `content` 去除，落款保留 |
-| 原始 HTML | 渲染整页与详情接口片段两份都存 |
-| 原文缺字符（如缺撇号） | 按"一字不改"原样保留 |
-| 列表外篇目 | 已发现的 2 篇（40219、40245）补入数据集，以 `source` 字段标明 |
+### 3. 列表外篇目说明
 
-### 已知数据特点
+网站上存在详情页可直接访问、但未出现在栏目列表中的文章。经与 `globalsecurity.org` 转载记录交叉核对，已确认 2 篇列表外例行记者会（两篇在网站上的标签均为空）：
+- `40219`：`2025-10-16` 例行记者会（`Transcript of Weekly Media Briefing by the Official Spokesperson (October 16, 2025)`）
+- `40245`：`2025-10-30` 例行记者会（`Transcript of Weekly Media Briefing by the Official Spokesperson (October 30, 2025)`）
 
-- 列表外补充的 2 篇没有网站标签，`tags` 为空列表。
-- 例行记者会为 0 篇的月份：2020-04（疫情期间暂停，5 月起改为线上）、2023-05（GlobalSecurity 在该月也只有专题吹风会转载）。
-- 2020 年有几篇标题为 "Readout/Statement … during the (Virtual) Weekly Media Briefing" 的篇目，按规则归为 `weekly_briefing`，但内容是单段发言而非完整实录；另有 2 篇 "Readout by the Official Spokesperson on India-China LAC Issue"（2020-08、2020-09）归为 `other_briefing`。
-- `spokesperson` 为 null 的 66 篇：原文只写 "Official Spokesperson said" 而无姓名，或正文未出现发言人身份。
-- `briefing_date` 为 null 的 20 篇 Transcripts：标题中本来没有日期。
-- 个别标题原文异常：2025-12-26 例行记者会列表标题末尾带 "Edited By admin"（详情页标题无此后缀，以详情页为准）；1 篇正文把发言人拼作 "Arindam Baghchi"，原样保留。
+这类篇目登记在 `src/mea_india/lists.py` 的 `SUPPLEMENTS` 字典中，抓取与解析流程与列表篇目一致，输出 JSON 中以 `source: "supplement"` 标识（栏目列表 CSV 仍只保存网站列表接口原样返回的内容）。
 
-### 待确认事项
+## 项目结构
 
-1. 是否系统排查其他列表外篇目：GlobalSecurity 只覆盖部分例行记者会（2020 年基本缺失，不覆盖答记者问），已发现的 2 篇说明网站上存在不进列表的文章。系统排查的做法是：取得"全部媒体"列表在时间范围内的全部编号，逐个探测编号 32253—40987 之间的空缺，再按标题和内容归入栏目。预计探测一两千个编号，耗时 1—2 小时。核对当天后段网站响应变慢、个别请求返回空内容，宜另择时段进行。
+```text
+.
+├── pyproject.toml           # 项目配置与依赖声明
+├── uv.lock                  # 依赖版本锁定文件
+├── README.md                # 项目说明文档
+├── USAGE.md                 # 命令速查说明
+├── src/mea_india/
+│   ├── __init__.py          # CLI 命令行入口
+│   ├── config.py            # 路径、栏目编号、时间范围与接口地址定义
+│   ├── stealth.py           # 浏览器属性修改与鼠标移动、滚轮滚动模拟
+│   ├── browser.py           # Playwright 浏览器会话封装、限速与接口响应获取
+│   ├── lists.py             # 列表分页抓取、CSV 读写与列表外补充篇目管理
+│   ├── details.py           # 详情页抓取、日志记录与断点续爬
+│   ├── parse.py             # 本地 HTML 片段清洗、字段提取与去重
+│   ├── globalsec.py         # GlobalSecurity.org 转载页面探测核对
+│   └── check.py             # 质量检查报告生成
+└── mea_data/
+    ├── raw_html/
+    │   ├── transcripts/     # 实录整页 *.html 与详情片段 *.fragment.html
+    │   └── media_responses/ # 答记者问整页 *.html 与详情片段 *.fragment.html
+    ├── lists/
+    │   ├── raw/             # 列表接口返回的原始分页 HTML
+    │   ├── transcripts_list.csv
+    │   └── media_responses_list.csv
+    ├── mea_documents.json   # 解析去重后的结构化数据
+    ├── crawl_log.csv        # 详情页抓取日志
+    ├── globalsecurity_check.json # GlobalSecurity 探测结果
+    ├── spot_check.json      # 随机 10 篇人工抽查核对记录
+    └── check_report.md      # 质量检查报告
+```
+
+## 当前数据与质检结果（截至 2026-11-06）
+
+- **抓取与入库数量**：共 682 篇（`transcripts` 栏目 460 篇，含列表 458 篇与列表外补充 2 篇；`media_responses` 栏目 222 篇），全部抓取成功，无失败记录，无重复记录，无空正文篇目。
+- **类型分布**：`weekly_briefing` 188 篇、`special_briefing` 243 篇、`other_briefing` 29 篇、`media_response` 222 篇。
+- **已知数据特点**：
+  - 例行记者会为 0 篇的月份：`2020-04`（疫情期间暂停线下例行记者会，5 月起改为线上）、`2023-05`（当月仅发布专题吹风会）。
+  - `spokesperson` 为 `null` 的篇目共 66 篇，原因是原文仅写 `Official Spokesperson said` 而未出现发言人姓名，或属于外交秘书等其他官员主持的专题吹风会。
+  - `briefing_date` 为 `null` 的 `transcripts` 篇目共 20 篇，原因是原页面标题中未附带日期。
+  - 有 7 篇实录（如 2025 年 5 月的 5 篇 `OPERATION SINDOOR` 吹风会）英文页面正文中包含少量直接以天城文记录的印地语问答段落，按原样保留。
+- **详细质检数据**：见 [mea_data/check_report.md](mea_data/check_report.md)。

@@ -2,18 +2,21 @@ import argparse
 
 
 def main() -> None:
+    common = argparse.ArgumentParser(add_help=False)
+    common.add_argument("--headed", action="store_true", default=argparse.SUPPRESS, help="显示浏览器窗口（默认无头模式）")
+
     parser = argparse.ArgumentParser(prog="mea-india", description="印度外交部 Transcripts / Response to Media Queries 爬虫")
     parser.add_argument("--headed", action="store_true", help="显示浏览器窗口（默认无头模式）")
     sub = parser.add_subparsers(dest="cmd", required=True)
 
-    sub.add_parser("list", help="抓取两个栏目的完整列表 -> mea_data/lists/")
+    sub.add_parser("list", parents=[common], help="抓取两个栏目的完整列表 -> mea_data/lists/")
 
-    p_fetch = sub.add_parser("fetch", help="逐篇抓取详情页（自动跳过已成功的篇目）")
+    p_fetch = sub.add_parser("fetch", parents=[common], help="逐篇抓取详情页（自动跳过已成功的篇目）")
     p_fetch.add_argument("--limit", type=int, help="每个栏目只抓最新的 N 篇（样例交付用）")
     p_fetch.add_argument("--only-failed", action="store_true", help="只补爬日志中失败过的篇目")
 
     sub.add_parser("parse", help="解析本地原始 HTML -> mea_data/mea_documents.json")
-    sub.add_parser("globalsec", help="用 GlobalSecurity.org 核对没有例行记者会的周")
+    sub.add_parser("globalsec", parents=[common], help="用 GlobalSecurity.org 核对没有例行记者会的周")
     sub.add_parser("check", help="生成质量检查报告 -> mea_data/check_report.md")
 
     args = parser.parse_args()
